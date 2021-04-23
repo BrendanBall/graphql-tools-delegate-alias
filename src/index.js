@@ -1,88 +1,79 @@
 const { makeExecutableSchema } = require('@graphql-tools/schema')
 const { stitchSchemas } = require('@graphql-tools/stitch')
-const { delegateToSchema } = require('@graphql-tools/delegate')
+const { batchDelegateToSchema } = require('@graphql-tools/batch-delegate')
+// const { ApolloServer } = require('apollo-server')
 const { graphql } = require('graphql')
-const { ApolloServer } = require('apollo-server')
 
 let postsSchema = makeExecutableSchema({
   typeDefs: `
     type Post {
       id: ID!
-      text: String
-      userId: ID!
+      text: String!
     }
 
     type Query {
-      postById(id: ID!): Post
+      postsByUserIds(userIds: [ID!]!): [[Post!]!]!
     }
   `,
   resolvers: { 
     Query: {
-      postById: (parent, { id }, ctx) => ({
-        id,
-        text: `text of post ${id}`,
-        userId: '1'
-      })
+      postsByUserIds: (parent, { userIds }, ctx) => userIds.map(userId => [({
+        id: `${userId}-post-1`,
+        text: `text of post 1 for user ${userId}`,
+      })])
     }
   }
 });
 
 let usersSchema = makeExecutableSchema({
   typeDefs: `
-    interface User {
+    type User {
       id: ID!
       email: String
     }
 
-    type AdminUser implements User {
-      id: ID!
-      email: String!
-      name: String!
-    }
-
     type Query {
-      userById(id: ID!): User
+      userById(id: ID!): User!
     }
   `,
   resolvers: { 
     Query: {
       userById: (parent, { id }, ctx) => ({
-        __typename: 'AdminUser',
         id,
         email: `${id}@example.com`,
-        name: 'Bob'
       })
     }
   }
 });
 
-// setup subschema configurations
-const postsSubschema = { schema: postsSchema };
-const usersSubschema = { schema: usersSchema };
-
 const schema = stitchSchemas({
   subschemas: [
-    postsSubschema,
-    usersSubschema,
+    postsSchema,
+    usersSchema,
   ],
   typeDefs: `
-    extend type Post {
-      user: User!
+    extend type User {
+      posts: [Post!]!
     }
   `,
   resolvers: {
-    Post: {
-      user: {
-        selectionSet: `{ userId }`,
-        resolve: async (post, args, context, info)  => {
-          const result = await delegateToSchema({
-            schema: usersSubschema,
+    User: {
+      posts: {
+        selectionSet: `{ id }`,
+        resolve: async (user, args, context, info)  => {
+          const result = await batchDelegateToSchema({
+            schema: postsSchema,
             operation: 'query',
-            fieldName: 'userById',
-            args: { id: post.userId },
+            fieldName: 'postsByUserIds',
+            key: user.id,
+            argsFromKeys: (userIds) => ({ userIds }),
+            returnType: postsSchema.getType('Query').getFields()['postsByUserIds'].type,
             context,
             info,
-          })
+            // This breaks aliasing
+            valuesFromResults: (results, keys) => results.map(r => [...r.map(p => ({ ...p }))])
+          });
+          console.log('delegate result symbols: ', Object.getOwnPropertySymbols(result[0]))
           console.log('delegate result: %j', result)
           return result
         },
@@ -91,29 +82,22 @@ const schema = stitchSchemas({
   }
 });
 
-const query = `query {
-  postById(id: "1") {
+// const server = new ApolloServer({ schema, debug: true });
+
+// server.listen().then(({ url }) => {
+//   console.log(`🚀  Server ready at ${url}`);
+// });
+
+const query = `{
+  userById(id: "u1") {
     id
-    text
-    user {
-      ...AdminUser
+    email
+    posts {
+      id
+      body: text
     }
   }
-
-  fragment AdminUser on AdminUser {
-    id
-    e: email
-    n: name
-  }
 }`
-// const result = graphql(schema, query, null, null, null)
-// result.then(post => console.log('query result: %j', post))
 
-// The ApolloServer constructor requires two parameters: your schema
-// definition and your set of resolvers.
-const server = new ApolloServer({ schema });
-
-// The `listen` method launches a web server.
-server.listen().then(({ url }) => {
-  console.log(`🚀  Server ready at ${url}`);
-});
+const result = graphql(schema, query)
+result.then(r => console.log('query result: %j', r))
